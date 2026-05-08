@@ -1,0 +1,47 @@
+# Three named services — same image, different default args.
+#
+# Override paths with env vars:
+#   AGENTSKILLS_INPUTS_HOST=/path/to/inputs        (default: ./inputs)
+#   AGENTSKILLS_PREPARED_HOST=/path/to/prepared    (default: ./outputs/prepared)
+#   AGENTSKILLS_SCANNING_HOST=/path/to/scan_outputs  (default: ../agent-skills-scanning/outputs)
+#   AGENTSKILLS_OUTPUTS_HOST=/path/to/outputs      (default: ./outputs)
+
+services:
+  base: &base
+    image: agent-skills-preparation:latest
+    build: .
+    environment:
+      AGENTSKILLS_CANONICAL_RECORDS: "${AGENTSKILLS_CANONICAL_RECORDS:-/data/inputs/canonical_skill_records.jsonl}"
+      AGENTSKILLS_PREPARED_ROOT:     "${AGENTSKILLS_PREPARED_ROOT:-/data/prepared}"
+      AGENTSKILLS_SCAN_RESULTS:      "${AGENTSKILLS_SCAN_RESULTS:-/data/scanning/unified_results.csv}"
+      AGENTSKILLS_LOGS_ROOT:         "/app/outputs/logs"
+      AGENTSKILLS_MANIFESTS_ROOT:    "/app/outputs/manifests"
+    volumes:
+      - ${AGENTSKILLS_INPUTS_HOST:-./inputs}:/data/inputs:ro
+      - ${AGENTSKILLS_PREPARED_HOST:-./outputs/prepared}:/data/prepared
+      - ${AGENTSKILLS_SCANNING_HOST:-../agent-skills-scanning/outputs}:/data/scanning:ro
+      - ${AGENTSKILLS_OUTPUTS_HOST:-./outputs}:/app/outputs
+      # Optional: bind a real config.yaml over the in-image template
+      # - ./config.yaml:/app/config.yaml:ro
+
+  normalize:
+    <<: *base
+    command: ["pipeline/main.py", "normalize", "--config", "/app/config.yaml",
+              "--normalized-version", "v1"]
+
+  build-phase1:
+    <<: *base
+    command: ["pipeline/main.py", "build_phase1", "--config", "/app/config.yaml",
+              "--normalized-version", "v1", "--output-version", "full_cpt_v1"]
+
+  build-phase2-hcl:
+    <<: *base
+    command: ["pipeline/main.py", "build_phase2_hcl", "--config", "/app/config.yaml",
+              "--full-cpt-version", "full_cpt_v1", "--output-version", "pl_hcl_v1"]
+
+  enrich-t3c:
+    <<: *base
+    command: ["pipeline/enrich_t3c.py",
+              "--pl-hcl-root", "/data/prepared/pl_hcl",
+              "--output-version", "pl_hcl_v1",
+              "--splits", "train,val,test"]

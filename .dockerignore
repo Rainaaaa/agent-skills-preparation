@@ -1,0 +1,41 @@
+# Build context exclusions
+
+# Prepared dataset artifacts + logs (large + reproducible)
+**/inputs
+**/outputs
+**/log
+**/logs
+**/prepared
+
+# Python caches
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+**/.ipynb_checkpoints
+
+# Editor / OS
+.git
+.gitignore
+.vscode
+.idea
+.DS_Store
+
+# Backups + scratch
+**/*.bak
+**/*.tmp
+**/*.swp
+**/_backup_*
+**/Untitled-*.ipynb
+
+# Secrets
+**/.env
+**/.env.*
+!**/.env.example
+
+# Per-host config (the example template ships in the image)
+config.yaml
+
+# Docs not needed inside the image
+*.md
+!README.md

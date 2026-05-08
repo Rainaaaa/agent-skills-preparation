@@ -1,0 +1,50 @@
+# Prepared dataset artifacts — large + reproducible. Keep local.
+# (Use `dir/*` rather than `dir/` so the .gitkeep placeholder still tracks.)
+inputs/*
+outputs/*
+**/log/
+**/logs/
+**/prepared/
+
+# Python caches / build
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.ipynb_checkpoints/
+*.egg-info/
+build/
+dist/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Backups + scratch
+*.bak
+*.tmp
+*.swp
+*~
+_backup_*/
+Untitled-*.ipynb
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# SLURM cluster outputs
+*.log
+*.err
+slurm-*.out
+
+# Local conda env / venv
+.venv/
+venv/
+
+# Per-host config (created from config.example.yaml)
+config.yaml
+
+# Allow placeholders so empty inputs/outputs trees survive a clone
+!inputs/.gitkeep
+!outputs/.gitkeep

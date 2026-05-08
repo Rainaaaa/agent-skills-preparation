@@ -1,0 +1,90 @@
+# agent-skills-preparation pipeline config — TEMPLATE
+#
+# First-time setup:
+#   cp config.example.yaml config.yaml
+#   $EDITOR config.yaml          # or just set the env vars below in your shell
+#
+# String values support ${VAR} and ${VAR:-default} interpolation from the
+# process environment. Unset vars fall back to the default after `:-`.
+# Same convention as the agent-skills-scanning repo.
+
+project:
+  name: "agent-skills-preparation"
+  description: "Versioned data preparation pipeline for AgentSkills-OSS misalignment datasets"
+
+paths:
+  # Upstream canonical export (one row per skill).
+  canonical_records: "${AGENTSKILLS_CANONICAL_RECORDS:-/data/canonical_skill_records.jsonl}"
+  # Top-level directory holding all prepared dataset versions. Each
+  # downstream stage writes to a subdirectory of this root.
+  prepared_root:     "${AGENTSKILLS_PREPARED_ROOT:-/data/prepared}"
+  # Workspace for SLURM logs + per-version manifest copies.
+  logs_root:         "${AGENTSKILLS_LOGS_ROOT:-./outputs/logs}"
+  manifests_root:    "${AGENTSKILLS_MANIFESTS_ROOT:-./outputs/manifests}"
+
+# ----------------------------------------------------------------------
+# Filter (NEW): drop skills that the upstream agent-skills-scanning
+# pipeline classified as malicious or misaligned BEFORE running normalize.
+#
+# Skipped when `scan_results` is empty / unset / file not present.
+# Override at the CLI: `pipeline/main.py normalize --scan-results <path>`.
+# ----------------------------------------------------------------------
+filter:
+  # Path to agent-skills-scanning's outputs/unified_results.csv.
+  scan_results: "${AGENTSKILLS_SCAN_RESULTS:-}"
+
+  # Drop a skill if its `overall_class` (maliciousness pillar — static_rule
+  # ∪ llm_filter ∪ behavioral) is in this list.
+  exclude_overall_classes:   ["MALICIOUS", "SUSPICIOUS"]
+
+  # Drop a skill if its `alignment_class` (intent-alignment dimension) is
+  # in this list. Independent axis from maliciousness; either condition
+  # firing is enough to drop.
+  exclude_alignment_classes: ["MALICIOUS", "SUSPICIOUS"]
+
+  # What to do with skills the scanning pipeline never saw (e.g. added to
+  # the corpus after the last scan). "keep" (default) is charitable; "drop"
+  # is strict and requires every skill to have a verdict.
+  unscanned_action: "keep"
+
+runtime:
+  workers: 16
+  batch_size: 128
+  split_seed: 20260423
+  train_fraction: 0.9
+  val_fraction: 0.05
+  test_fraction: 0.05
+  max_package_file_chars: 12000
+  max_concat_chars: 48000
+  max_stage_chars: 16000
+  max_phase1_view_chars: 16000
+  max_phase3_evidence_chars: 20000
+  parquet_compression: "zstd"
+
+phase1:
+  stage1_max_tokens: 4096
+  stage2_max_tokens: 10240
+  cpt_unseen_fraction: 0.5
+  cpt_train_fraction: 0.8
+  cpt_val_fraction: 0.1
+  cpt_test_fraction: 0.1
+  pool_seed: 20260501
+  split_seed: 20260502
+  max_metadata_chars: 0
+  max_instruction_chars: 0
+  max_resource_per_file_chars: 0
+  max_resource_total_chars: 0
+
+phase2_hcl:
+  stage1_max_tokens: 4096
+  stage2_max_tokens: 10240
+  k_donors: 2
+  k_span_donors: 2
+  t3b_span_fraction: 0.15
+  t3b_span_cap_chars: 1500
+  t3b_span_min_chars: 200
+  seed: 20260601
+  # T3a (LLM-based behavior corruption) is a separate enrichment script:
+  #   python -m pipeline.enrich_t3a --help
+  # T3c (rule-based hallucinated-identifier injection) similarly:
+  #   python -m pipeline.enrich_t3c --help

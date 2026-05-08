@@ -1,0 +1,16 @@
+# agent-skills-preparation runtime deps.
+#
+# Core preparation pipeline only. T3a enrichment (vLLM) has its own
+# extra requirements documented in the README — not pinned here so the
+# base image stays small for users who only run normalize / phase1 /
+# phase2_hcl / T3c.
+
+PyYAML>=6.0,<7
+pyarrow>=14.0,<22
+
+# T3c is rule-based, no extra deps.
+
+# T3a optional extras (uncomment if you build a GPU image):
+# vllm>=0.8.5,<0.9
+# transformers>=4.40,<4.46
+# torch>=2.1,<3
