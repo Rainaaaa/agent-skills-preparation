@@ -201,9 +201,18 @@ def run_normalize(
         stats["avg_text_chars_per_skill"] = 0.0
 
     if filter_report is not None and filter_policy is not None:
+        # Persist the audit trail. The excluded list is the seed corpus
+        # for downstream real-world evaluation (human review will refine
+        # it but not extend it beyond what was flagged here).
+        excluded_path = output_dir / "excluded_skill_ids.txt"
+        excluded_path.write_text(
+            "\n".join(filter_report.excluded_skill_ids) + ("\n" if filter_report.excluded_skill_ids else ""),
+            encoding="utf-8",
+        )
         stats["scan_filter"] = {
             "enabled": True,
             "scan_results_path": str(scan_results_path) if scan_results_path else "",
+            "excluded_skill_ids_path": str(excluded_path),
             "policy": {
                 "exclude_overall_classes":   sorted(filter_policy.exclude_overall_classes),
                 "exclude_alignment_classes": sorted(filter_policy.exclude_alignment_classes),

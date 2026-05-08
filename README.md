@@ -3,8 +3,33 @@
 Versioned data-preparation pipeline for the AgentSkills-OSS misalignment
 project. Turns the upstream **canonical_skill_records.jsonl** into the
 training-ready dataset versions consumed by the model trainers, with a
-new **scan-result filter** that drops malicious / misaligned skills
-before they enter the corpus.
+**verdict filter** that splits the corpus into two streams:
+
+- **Clean skills** → synthesized into T1/T2/T3 negatives for **model
+  training, validation, and testing**.
+- **Misaligned / malicious skills** → set aside as the **real-world
+  downstream-evaluation corpus** (the audit trail in
+  `excluded_skill_ids.txt`).
+
+The verdict source is configurable: it can be the auto-scan output from
+`agent-skills-scanning` while human review is in progress, then swapped
+for a human-reviewed CSV once review is complete. The pipeline never
+hardcodes a path.
+
+### Roles of the synthesized corruption types
+
+| Type | What it is                                | Used for                                |
+| ---- | ----------------------------------------- | --------------------------------------- |
+| T1   | Internal layer permutation (same skill, wrong order) | Continual pretraining (CPT)        |
+| T2   | External layer swap (donor skills)        | Contrastive learning                    |
+| T3a  | LLM span-based behavior corruption        | Contrastive learning                    |
+| T3b  | Span swap from same-pool donor            | Contrastive learning                    |
+| T3c  | Rule-based hallucinated-identifier inj.   | Contrastive learning                    |
+
+Run `python -m pipeline.balance_phase2 ...` after the enrichment stages
+to get **equal-distribution** balanced views for each split, so no one
+type dominates the trainer's batches. See [Balanced view](#balanced-view)
+below.
 
 ```
                 canonical_skill_records.jsonl
@@ -42,7 +67,9 @@ construction details.
 
 | Change | Why |
 | --- | --- |
-| **Scan-result filter** in `normalize` | Skills classified as malicious or misaligned by [agent-skills-scanning](https://github.com/Rainaaaa/agent-skills-scanning) are dropped *before* the dataset is built. Configurable policy under `filter:` in `config.yaml`. |
+| **Verdict filter** in `normalize` | Skills classified as malicious or misaligned (by [agent-skills-scanning](https://github.com/Rainaaaa/agent-skills-scanning) auto-scan **or a human-reviewed CSV with the same schema**) are dropped *before* the dataset is built. Configurable policy under `filter:` in `config.yaml`. The dropped list lands in `excluded_skill_ids.txt` so it can be reused as a real-world evaluation corpus. |
+| **Binary alignment vocab** | The alignment axis emits `{ALIGNED, MISALIGNED, ERROR}` instead of `{SAFE, SUSPICIOUS, MALICIOUS, ERROR}`. Aligns with the upstream scanner; severity stays in the verdict's `raw` payload for ablations. |
+| **NEW** `pipeline/balance_phase2.py` | Equal-distribution sampler. Emits a `balanced_cpt` view (positives + T1) and a `balanced_contrastive` view (T2 + T3a + T3b + T3c) per split, downsampled to equal counts per type. Reproducible via the same seed. |
 | **YAML config + `${VAR:-default}` interpolation** | Same convention as agent-skills-collection / -scanning. Cloners can run with env vars, no need to edit YAML for every install. |
 | **Package layout** | Source moves from `src/` to `pipeline/` (a real Python package). `python -m pipeline.main normalize ...` — no more `sys.path` hacks. |
 | **Deprecated `build_phase2` (legacy pair-based) and `build_phase3` removed** | Per the previous README's deprecation note: PD-HMCL Phase 2 and the SFT Phase 3 path were already off the live training flow. |
@@ -103,46 +130,62 @@ pip install -r requirements.txt
 
 ## Running
 
-### Stage A — Normalize (with scan filter)
+### Stage A — Normalize (with verdict filter)
 
 ```bash
 python -m pipeline.main normalize \
     --config config.yaml \
     --normalized-version v1 \
-    --scan-results /path/to/unified_results.csv      # optional; falls back to env / config
+    --scan-results /path/to/verdicts.csv     # optional; falls back to env / config
 ```
+
+`--scan-results` is the single configuration knob. Point it at:
+
+- The **auto-scan** output from `agent-skills-scanning`
+  (`outputs/unified_results.csv`) while human review is still in progress.
+- A **human-reviewed CSV** once that's ready. Same schema:
+
+  ```csv
+  skill_id,overall_class,alignment_class
+  owner-repo-skill-md,MALICIOUS,MISALIGNED
+  another-skill,SAFE,ALIGNED
+  ```
 
 The filter logs how many skills were dropped per axis:
 
 ```
 [scan_filter] policy: drop_overall=['MALICIOUS', 'SUSPICIOUS']
-              drop_alignment=['MALICIOUS', 'SUSPICIOUS']
+              drop_alignment=['MISALIGNED']
               unscanned_action=keep
 [scan_filter] excluded_by_overall=2143  excluded_by_alignment=178
               excluded_by_either=2204  kept=263840
               unscanned_kept=14  unscanned_dropped=0
 ```
 
-The drop counts also land in
-`normalized/<v>/stats.json > scan_filter.report` so they're auditable
-forever.
+The drop counts land in `normalized/<v>/stats.json > scan_filter.report`,
+and the **list of dropped skill_ids** is written to
+`normalized/<v>/excluded_skill_ids.txt`. That file is the seed for the
+real-world downstream-evaluation corpus — the model is judged on exactly
+those skills (refined through human review later if needed).
 
 #### Filter policy
 
-Default: drop a skill if EITHER axis says MALICIOUS or SUSPICIOUS.
+Default: drop a skill if `overall_class ∈ {MALICIOUS, SUSPICIOUS}` OR
+`alignment_class == MISALIGNED`.
 
 Override in `config.yaml`:
 
 ```yaml
 filter:
   scan_results: "${AGENTSKILLS_SCAN_RESULTS:-}"
-  exclude_overall_classes:   ["MALICIOUS"]                    # only malicious; keep suspicious
-  exclude_alignment_classes: ["MALICIOUS", "SUSPICIOUS"]
-  unscanned_action: "drop"                                    # strict — every skill must have a verdict
+  exclude_overall_classes:   ["MALICIOUS"]    # keep SUSPICIOUS-only skills
+  exclude_alignment_classes: ["MISALIGNED"]
+  unscanned_action: "drop"                    # strict — every skill must have a verdict
 ```
 
 If `scan_results` is empty / unset / file missing, the filter is a
-**no-op** and normalize processes the full canonical set.
+**no-op** and normalize processes the full canonical set (handy for a
+first pass before any verdicts exist).
 
 ### Stage B — Phase 1 (Structured CLM CPT)
 
@@ -183,6 +226,37 @@ python -m pipeline.enrich_t3c \
 T3a and T3c read the **same** Phase 2 HCL positives but write to
 **different** files (`*_t3a.parquet` vs `*_t3c.parquet`), so they can
 run in parallel.
+
+### Balanced view
+
+After the enrichment stages finish, every type has a different per-split
+row count. Run the balanced sampler to materialize equal-distribution
+training views:
+
+```bash
+python -m pipeline.balance_phase2 \
+    --pl-hcl-root  /path/to/datasets/misalignment/pl_hcl \
+    --full-cpt-root /path/to/datasets/misalignment/full_cpt \
+    --pl-hcl-version  pl_hcl_v1 \
+    --full-cpt-version full_cpt_v1 \
+    --splits train,val,test
+```
+
+Output:
+
+| Path | What it contains |
+| ---- | ---------------- |
+| `full_cpt/<v>/<stage>/<split>_balanced_cpt.parquet`            | positives + T1, equal counts per type — for **continual pretraining** |
+| `pl_hcl/<v>/<stage>/<split>_balanced_contrastive.parquet`      | T2 + T3a + T3b + T3c, equal counts per type — for **contrastive learning** |
+| `pl_hcl/<v>/stats_balanced.json`                                | Per-(stage, split) sampling summary (kept counts, target, seed) |
+
+By default each type is downsampled to `min(rows per type)` for that
+split, so the balanced view's row count is `n_types × min_count`. Set
+`--target-rows-per-type N` to cap each type at `N` rows instead.
+
+The sampler is **non-destructive** — the original per-label parquets
+(`<split>.parquet`, `<split>_t1.parquet`, …) stay in place for ablations
+or per-class weighting.
 
 ### Docker
 

@@ -1,19 +1,37 @@
-"""Filter canonical skill records against an upstream scanning verdict.
+"""Filter canonical skill records against a verdict CSV.
 
-Reads `outputs/unified_results.csv` (produced by agent-skills-scanning's
-`pipeline.aggregate_results`) and decides which `skill_id`s are admissible
-for downstream training-data preparation.
+The verdict CSV can come from two sources, in priority order:
 
-Default policy (configurable in `config.yaml > filter`):
+  1. **Human-reviewed**  — a hand-curated CSV produced by reviewers.
+     This is what production runs should consume. The path is
+     configurable so the user can swap auto-scan for human-reviewed
+     output the moment review is done, without editing any code.
+  2. **Auto-scan**       — `outputs/unified_results.csv` produced by
+     agent-skills-scanning's `pipeline.aggregate_results`. Used as a
+     placeholder while human review is still in progress.
 
-  drop if `overall_class`   ∈ {MALICIOUS, SUSPICIOUS}      (maliciousness pillar)
-  drop if `alignment_class` ∈ {MALICIOUS, SUSPICIOUS}      (alignment dimension)
-  keep skills not present in the scan results, with a counter logged
-  (the user typically wants to be told how many fell through, not for
-  the run to fail).
+Either source must use the same column schema:
+
+    skill_id, overall_class, alignment_class    (and optionally other columns)
+
+  - `overall_class`   ∈ {SAFE, SUSPICIOUS, MALICIOUS, ERROR}   (maliciousness pillar)
+  - `alignment_class` ∈ {ALIGNED, MISALIGNED, ERROR}            (alignment axis, binary)
+
+Default drop policy (configurable in `config.yaml > filter`):
+
+  drop if `overall_class`   ∈ {MALICIOUS, SUSPICIOUS}
+  drop if `alignment_class` ∈ {MISALIGNED}
+  keep skills not present in the verdict CSV, with a counter logged
 
 Embedded inside `pipeline.normalize.run_normalize` — the user only has
-to point `--scan-results` at the file, or set the env var.
+to point `--scan-results` at the file, or set the env var, or fill in
+`filter.scan_results` in config.yaml.
+
+The skills that survive this filter are the ones used to **synthesize
+training/val/test data** (T1/T2/T3 negatives in the contrastive layer).
+The skills that DON'T survive — those flagged misaligned or malicious —
+are kept in a separate audit trail (the path lives in stats.json) so
+they can serve as **real-world evaluation data** for downstream tasks.
 """
 
 from __future__ import annotations
@@ -27,7 +45,7 @@ from pipeline._shared import LOGGER
 
 
 DEFAULT_EXCLUDE_OVERALL = frozenset({"MALICIOUS", "SUSPICIOUS"})
-DEFAULT_EXCLUDE_ALIGNMENT = frozenset({"MALICIOUS", "SUSPICIOUS"})
+DEFAULT_EXCLUDE_ALIGNMENT = frozenset({"MISALIGNED"})
 
 
 @dataclass
@@ -69,8 +87,13 @@ class FilterReport:
     kept: int = 0
     unscanned_kept: int = 0
     unscanned_dropped: int = 0
+    # The list of dropped skill_ids — useful as a downstream-evaluation
+    # corpus (real-world misaligned / malicious cases) once human review
+    # is complete. Kept separate from the in-memory keep set so callers
+    # can persist it independently.
+    excluded_skill_ids: list = field(default_factory=list)
 
-    def to_dict(self) -> Dict[str, int]:
+    def to_dict(self) -> Dict[str, object]:
         return {
             "total_in_scan_results":  self.total_in_scan_results,
             "excluded_by_overall":    self.excluded_by_overall,
@@ -79,6 +102,9 @@ class FilterReport:
             "kept":                   self.kept,
             "unscanned_kept":         self.unscanned_kept,
             "unscanned_dropped":      self.unscanned_dropped,
+            # Counted separately to keep stats.json scannable; the full
+            # list is written next to it as `excluded_skill_ids.txt`.
+            "excluded_skill_ids_count": len(self.excluded_skill_ids),
         }
 
 
@@ -118,7 +144,11 @@ def build_keep_set(
     scan_index: Dict[str, Dict[str, str]],
     policy: FilterPolicy,
 ) -> "tuple[Set[str], FilterReport]":
-    """Apply the policy to the candidate skill_ids; return (keep_set, report)."""
+    """Apply the policy to the candidate skill_ids; return (keep_set, report).
+
+    The report carries the full list of excluded skill_ids so a caller
+    can persist them as a downstream-evaluation corpus.
+    """
     report = FilterReport(total_in_scan_results=len(scan_index))
     keep: Set[str] = set()
 
@@ -141,6 +171,7 @@ def build_keep_set(
             report.excluded_by_alignment += 1
         if excl_ovr or excl_aln:
             report.excluded_by_either += 1
+            report.excluded_skill_ids.append(sid)
             continue
 
         keep.add(sid)
